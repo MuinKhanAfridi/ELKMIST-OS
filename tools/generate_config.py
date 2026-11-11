@@ -13,17 +13,28 @@ Design rules (safety first):
   * The SAVE_CONFIG block that Klipper appends (PID results, offsets ...) is
     preserved when printer.cfg is regenerated.
 
+Extruder models:
+  * extruder_profiles.ini (next to machine.ini) lists the supported extruders.
+  * The model is chosen ONCE during installation and stored in
+    ~/printer_data/config/machine.local.ini  ->  [extruder] model = LGX
+  * rotation_distance / gear_ratio / run_current come from the profile,
+    unless machine.ini [extruder] sets its own value (that always wins).
+  * Pins, hotend, sensors and drivers stay in machine.ini (same for all models).
+
 Usage:  generate_config.py [--ini machine.ini] [--out DIR] [--check]
+                           [--choose-extruder] [--extruder NAME] [--list-extruders]
 Python 3.7+, standard library only.
 """
 import argparse
 import configparser
 import glob
 import os
+import re
 import sys
 
 SAVE_MARK = "#*# <---------------------- SAVE_CONFIG ---------------------->"
 UNSET_WORDS = {"", "unset", "todo", "tbd", "none-yet"}
+DEFAULT_MODEL = "LGX"
 
 KIT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -66,7 +77,7 @@ def fmt(x):
     """Number without trailing .0"""
     if x == int(x):
         return str(int(x))
-    return ("%.4f" % x).rstrip("0").rstrip(".")
+    return ("%.5f" % x).rstrip("0").rstrip(".")
 
 
 def pin(value, invert=False):
@@ -76,13 +87,152 @@ def pin(value, invert=False):
     return value
 
 
+# ----------------------------------------------------------------- extruder profiles
+def model_key(name):
+    """'bondtech lgx-lite' -> 'BONDTECH_LGX_LITE' (profile names are upper case)."""
+    return re.sub(r"[\s\-]+", "_", (name or "").strip()).upper()
+
+
+def load_profiles(paths):
+    cp = configparser.ConfigParser(
+        inline_comment_prefixes=("#",), interpolation=None)
+    cp.optionxform = str
+    cp.read([p for p in paths if os.path.exists(p)])
+    return cp
+
+
+def profile_value(profiles, section, key):
+    try:
+        v = profiles.get(section, key).strip()
+    except (configparser.NoSectionError, configparser.NoOptionError):
+        return None
+    return None if v.lower() in UNSET_WORDS else v
+
+
+def profile_missing(profiles, section):
+    """Which important values of a profile are still UNSET."""
+    return [k for k in ("rotation_distance", "run_current")
+            if profile_value(profiles, section, k) is None]
+
+
+def list_profiles(profiles):
+    lines = []
+    for i, sec in enumerate(profiles.sections(), 1):
+        title = profile_value(profiles, sec, "title") or sec
+        vendor = profile_value(profiles, sec, "vendor") or ""
+        origin = profile_value(profiles, sec, "origin") or ""
+        miss = profile_missing(profiles, sec)
+        tag = ("   [still needed: %s]" % ", ".join(miss)) if miss else ""
+        lines.append("  %2d) %-34s %s, %s%s" % (i, title, vendor, origin, tag))
+    return lines
+
+
+def chosen_model(cfg):
+    """Model written in machine.ini or machine.local.ini, or None."""
+    return cfg.get("extruder", "model")
+
+
+def set_local_model(path, name):
+    """Write  [extruder] model = NAME  into machine.local.ini, keeping the rest."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lines = []
+    if os.path.exists(path):
+        with open(path) as fh:
+            lines = fh.read().splitlines()
+    out, in_ext, done, has_sec = [], False, False, False
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("[") and s.endswith("]"):
+            if in_ext and not done:
+                out.append("model = %s" % name)
+                done = True
+            in_ext = (s.lower() == "[extruder]")
+            has_sec = has_sec or in_ext
+        elif in_ext and re.match(r"model\s*=", s):
+            ln = "model = %s" % name
+            done = True
+        out.append(ln)
+    if in_ext and not done:
+        out.append("model = %s" % name)
+        done = True
+    if not has_sec:
+        out += ["", "[extruder]", "model = %s" % name]
+    with open(path, "w") as fh:
+        fh.write("\n".join(out).strip("\n") + "\n")
+
+
+def ask_extruder(profiles):
+    """Ask on the keyboard (works even when the script is started through a pipe).
+    Returns a profile name, or None when nobody can answer."""
+    names = profiles.sections()
+    try:
+        tty = open("/dev/tty", "r+")
+    except OSError:
+        return None
+    try:
+        tty.write("\n=== Which extruder is built into this printer? ===\n")
+        tty.write("\n".join(list_profiles(profiles)) + "\n")
+        for _ in range(5):
+            tty.write("\nType the number (Enter = 1, %s): " % names[0])
+            tty.flush()
+            ans = tty.readline()
+            if ans == "":
+                return None
+            ans = ans.strip()
+            if ans == "":
+                return names[0]
+            if ans.isdigit() and 1 <= int(ans) <= len(names):
+                return names[int(ans) - 1]
+            if model_key(ans) in names:
+                return model_key(ans)
+            tty.write("Not a valid choice.\n")
+        return None
+    finally:
+        tty.close()
+
+
 # ----------------------------------------------------------------- printer.cfg
 class Builder:
-    def __init__(self, cfg):
+    def __init__(self, cfg, profiles):
         self.c = cfg
+        self.profiles = profiles
         self.warn = []
         self.missing = []          # things needed for motion
         self.out = []
+        self.motion = False
+        self.extruder_on = False   # True only when [extruder] was really written
+        # extruder model
+        name = cfg.get("extruder", "model", DEFAULT_MODEL)
+        self.model = model_key(name)
+        self.profile_ok = self.model in profiles.sections()
+        if not self.profile_ok:
+            self.warn.append(
+                "Unknown extruder model '%s'. Known models: %s. Extruder values must "
+                "then be written in machine.ini [extruder]."
+                % (name, ", ".join(profiles.sections()) or "none"))
+
+    # ---- extruder values: machine.ini wins, the profile is the fallback
+    def ext(self, key):
+        v = self.c.get("extruder", key)
+        if v is not None:
+            return v
+        if self.profile_ok:
+            return profile_value(self.profiles, self.model, key)
+        return None
+
+    def extnum(self, key, default=None):
+        v = self.ext(key)
+        if v is None:
+            return default
+        try:
+            return float(v.rstrip("%"))
+        except ValueError:
+            sys.exit("ERROR: extruder %s = %r is not a number" % (key, v))
+
+    def ext_title(self):
+        if self.profile_ok:
+            return profile_value(self.profiles, self.model, "title") or self.model
+        return self.model
 
     # ---- MCU
     def comm(self):
@@ -146,6 +296,7 @@ class Builder:
               "# Do NOT edit by hand: edit machine.ini and run ./update.sh",
               "# (the SAVE_CONFIG block at the bottom is kept automatically)",
               "# Printer: %s" % name,
+              "# Extruder model: %s" % self.ext_title(),
               "# ======================================================", ""]
 
         # MCU
@@ -240,37 +391,43 @@ class Builder:
 
     def extruder(self, motion):
         c, o = self.c, self.out
-        sec = "extruder"
         need = ["step_pin", "dir_pin", "enable_pin", "cs_pin", "run_current",
                 "rotation_distance", "heater_pin", "sensor_type", "sensor_pin"]
-        ok, miss = self.heater_ok(sec, need)
-        if not ok:
-            o += ["# [extruder] not generated yet. Missing: " + ", ".join(miss), ""]
+        miss = [k for k in need if self.ext(k) is None]
+        if miss:
+            where = ("extruder_profiles.ini [%s] or machine.ini [extruder]" % self.model
+                     if self.profile_ok else "machine.ini [extruder]")
+            o += ["# [extruder] not generated yet (model: %s). Missing: %s"
+                  % (self.ext_title(), ", ".join(miss)),
+                  "#   rotation_distance / run_current / gear_ratio: see " + where, ""]
             return
         if not self.motion:
             o += ["# [extruder] complete but NOT generated: motion is still in SAFE MODE.", ""]
             return
-        g = lambda k: c.get(sec, k)
+        g = self.ext
         o += ["[extruder]",
               "step_pin: %s" % g("step_pin"),
-              "dir_pin: %s" % pin(g("dir_pin"), c.yes(sec, "invert_dir")),
-              "enable_pin: %s" % pin(g("enable_pin"), c.yes(sec, "enable_active_low", True)),
+              "dir_pin: %s" % pin(g("dir_pin"), c.yes("extruder", "invert_dir")),
+              "enable_pin: %s" % pin(g("enable_pin"), c.yes("extruder", "enable_active_low", True)),
               "microsteps: %d" % int(c.num("drivers", "microsteps", 16)),
-              "rotation_distance: %s" % fmt(c.num(sec, "rotation_distance")),
-              "nozzle_diameter: %s" % fmt(c.num(sec, "nozzle_diameter", 0.4)),
-              "filament_diameter: %s" % fmt(c.num(sec, "filament_diameter", 1.75)),
+              "rotation_distance: %s" % fmt(self.extnum("rotation_distance"))]
+        if g("gear_ratio"):
+            o.append("gear_ratio: %s" % g("gear_ratio"))
+        o += ["nozzle_diameter: %s" % fmt(self.extnum("nozzle_diameter", 0.4)),
+              "filament_diameter: %s" % fmt(self.extnum("filament_diameter", 1.75)),
               "heater_pin: %s" % g("heater_pin"),
               "sensor_type: %s" % g("sensor_type"),
               "sensor_pin: %s" % g("sensor_pin"),
               "control: pid",
-              "pid_Kp: %s" % fmt(c.num(sec, "pid_kp", 22.2)),
-              "pid_Ki: %s" % fmt(c.num(sec, "pid_ki", 1.08)),
-              "pid_Kd: %s" % fmt(c.num(sec, "pid_kd", 114)),
+              "pid_Kp: %s" % fmt(self.extnum("pid_kp", 22.2)),
+              "pid_Ki: %s" % fmt(self.extnum("pid_ki", 1.08)),
+              "pid_Kd: %s" % fmt(self.extnum("pid_kd", 114)),
               "min_temp: 0",
-              "max_temp: %s" % fmt(c.num(sec, "max_temp", 285)),
-              "min_extrude_temp: %s" % fmt(c.num(sec, "min_extrude_temp", 170)),
-              "pressure_advance: %s" % fmt(c.num(sec, "pressure_advance", 0)), ""]
-        self.driver("extruder", g("cs_pin"), c.num(sec, "run_current"))
+              "max_temp: %s" % fmt(self.extnum("max_temp", 285)),
+              "min_extrude_temp: %s" % fmt(self.extnum("min_extrude_temp", 170)),
+              "pressure_advance: %s" % fmt(self.extnum("pressure_advance", 0)), ""]
+        self.driver("extruder", g("cs_pin"), self.extnum("run_current"))
+        self.extruder_on = True
 
     def bed(self):
         c, o = self.c, self.out
@@ -300,7 +457,7 @@ class Builder:
         if not self.motion:
             return
         hp = c.get("fans", "hotend_fan_pin")
-        if hp and c.get("extruder", "heater_pin"):
+        if hp and self.extruder_on:   # the fan needs a real [extruder] heater
             o += ["[heater_fan hotend_fan]", "pin: %s" % hp,
                   "heater: extruder", "heater_temp: 50.0", ""]
         pp = c.get("fans", "part_fan_pin")
@@ -466,13 +623,57 @@ def main():
     ap.add_argument("--local-ini", default=os.path.expanduser(
         "~/printer_data/config/machine.local.ini"),
         help="optional overrides (same format), read after --ini")
+    ap.add_argument("--profiles", default=os.path.join(KIT_DIR, "extruder_profiles.ini"),
+                    help="list of supported extruders")
     ap.add_argument("--out", default=os.path.expanduser("~/printer_data/config"))
     ap.add_argument("--check", action="store_true",
                     help="print report only, write nothing")
+    ap.add_argument("--choose-extruder", action="store_true",
+                    help="ask which extruder is installed and remember the answer")
+    ap.add_argument("--extruder", metavar="NAME",
+                    help="set the extruder model without asking (e.g. LGX_LITE_PRO)")
+    ap.add_argument("--list-extruders", action="store_true",
+                    help="show the supported extruders and stop")
     a = ap.parse_args()
 
-    cfg = Cfg([p for p in (a.ini, a.local_ini) if os.path.exists(p)])
-    b = Builder(cfg)
+    local_profiles = os.path.join(os.path.dirname(a.local_ini), "extruder_profiles.local.ini")
+    profiles = load_profiles([a.profiles, local_profiles])
+
+    if a.list_extruders:
+        print("Supported extruders:")
+        print("\n".join(list_profiles(profiles)))
+        return 0
+
+    def read_cfg():
+        return Cfg([p for p in (a.ini, a.local_ini) if os.path.exists(p)])
+
+    cfg = read_cfg()
+    notes = []
+
+    # ---- which extruder? (asked once, during installation)
+    if a.extruder:
+        key = model_key(a.extruder)
+        if key not in profiles.sections():
+            sys.exit("ERROR: unknown extruder '%s'. Known: %s"
+                     % (a.extruder, ", ".join(profiles.sections())))
+        if not a.check:
+            set_local_model(a.local_ini, key)
+            cfg = read_cfg()
+    elif (a.choose_extruder or chosen_model(cfg) is None) and not a.check:
+        picked = ask_extruder(profiles) if profiles.sections() else None
+        if picked:
+            set_local_model(a.local_ini, picked)
+            cfg = read_cfg()
+        elif a.choose_extruder:
+            sys.exit("ERROR: no keyboard available. Use  --extruder NAME  instead "
+                     "(see --list-extruders).")
+        else:
+            notes.append(
+                "No extruder chosen yet - using %s. To choose: "
+                "python3 ~/printer-kit/tools/generate_config.py --choose-extruder"
+                % DEFAULT_MODEL)
+
+    b = Builder(cfg, profiles)
     text = b.build()
 
     # keep Klipper's SAVE_CONFIG block
@@ -484,11 +685,12 @@ def main():
 
     print("=" * 60)
     print("MODE: %s" % ("MOTION ENABLED" if b.motion else "SAFE MODE (no motion)"))
+    print("EXTRUDER: %s" % b.ext_title())
     if b.missing:
         print("Still needed for motion:")
         for m in b.missing:
             print("   - " + m)
-    for w in b.warn:
+    for w in b.warn + notes:
         print("WARNING: " + w)
     print("=" * 60)
     if a.check:
@@ -531,6 +733,8 @@ def main():
             "bed_y": cfg.num("axis_y", "position_max", 200),
             "motion_enabled": b.motion,
             "printer_name": cfg.get("general", "printer_name", "3D printer"),
+            "extruder_model": b.model,
+            "extruder_title": b.ext_title(),
         }, fh, indent=2)
     print("Wrote: %s" % cfg_path)
     return 0
