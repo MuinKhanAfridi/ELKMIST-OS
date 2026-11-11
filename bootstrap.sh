@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # One-line installer for customers (Raspberry Pi OS, 64-bit):
-#   curl -fsSL https://raw.githubusercontent.com/YOUR-ORG/YOUR-REPO/main/bootstrap.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/MuinKhanAfridi/ELKMIST-OS/main/bootstrap.sh | bash
 set -Eeuo pipefail
-REPO_URL="${KIT_REPO_URL:-https://github.com/YOUR-ORG/YOUR-REPO.git}"
+REPO_URL="${KIT_REPO_URL:-https://github.com/MuinKhanAfridi/ELKMIST-OS.git}"
 BRANCH="${KIT_BRANCH:-main}"
 TARGET="$HOME/printer-kit"
 if [ "$(id -u)" -eq 0 ]; then echo "Run as the normal user, not root."; exit 1; fi

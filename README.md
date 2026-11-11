@@ -21,10 +21,10 @@ One-command software for our Cartesian 3D printer:
 3. Run the one-line installer (takes 10-20 minutes):
 
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/YOUR-ORG/YOUR-REPO/main/bootstrap.sh | bash
+   curl -fsSL https://raw.githubusercontent.com/MuinKhanAfridi/ELKMIST-OS/main/bootstrap.sh | bash
    ```
 
-   (Private repository? Clone it yourself first: `git clone https://github.com/YOUR-ORG/YOUR-REPO.git ~/printer-kit && ~/printer-kit/install.sh`)
+   (Private repository? Clone it yourself first: `git clone https://github.com/MuinKhanAfridi/ELKMIST-OS.git ~/printer-kit && ~/printer-kit/install.sh`)
 4. Connect the Arduino Due (USB port next to the power jack) to the Pi and run `~/printer-kit/tools/flash_mcu.sh`
 5. Open `http://printer.local/` for Mainsail. **Auto Slicer** is in the left menu (or `http://printer.local/api/slicer/`).
 
@@ -60,9 +60,9 @@ nano ~/printer-kit/machine.ini      # or edit on GitHub and pull
 * The `SAVE_CONFIG` block Klipper writes (PID tuning, offsets) is preserved when `printer.cfg` is regenerated.
 
 ### Before shipping to customers
-1. Replace `YOUR-ORG/YOUR-REPO` in `machine.ini`, `bootstrap.sh` and this file.
-2. Do a full install + print on a spare Pi and printer.
-3. Pin the tested versions in `versions.env` so every customer gets exactly what you tested.
+1. Do a full install + print on a spare Pi and printer.
+2. Pin the tested versions in `versions.env` so every customer gets exactly what you tested.
+3. 
 
 ---
 
