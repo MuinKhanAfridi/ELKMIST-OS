@@ -36,6 +36,15 @@ QUALITY = {            # label -> layer height (mm)
 }
 
 app = Flask(__name__)
+
+# First-run setup wizard (autoslice/wizard.py). If it ever fails to load, the
+# Auto Slicer still works normally.
+try:
+    import wizard
+    wizard.register(app)
+except Exception as _wizard_error:
+    print("Setup wizard not loaded: %s" % _wizard_error)
+
 os.makedirs(JOBS_DIR, exist_ok=True)
 jobs = {}                       # id -> dict
 jobs_lock = threading.Lock()

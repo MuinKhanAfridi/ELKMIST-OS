@@ -132,33 +132,39 @@ def chosen_model(cfg):
     return cfg.get("extruder", "model")
 
 
-def set_local_model(path, name):
-    """Write  [extruder] model = NAME  into machine.local.ini, keeping the rest."""
+def set_local_value(path, section, key, value):
+    """Write  [section] key = value  into machine.local.ini, keeping the rest."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     lines = []
     if os.path.exists(path):
         with open(path) as fh:
             lines = fh.read().splitlines()
-    out, in_ext, done, has_sec = [], False, False, False
+    new = "%s = %s" % (key, value)
+    out, in_sec, done, has_sec = [], False, False, False
     for ln in lines:
         s = ln.strip()
         if s.startswith("[") and s.endswith("]"):
-            if in_ext and not done:
-                out.append("model = %s" % name)
+            if in_sec and not done:
+                out.append(new)
                 done = True
-            in_ext = (s.lower() == "[extruder]")
-            has_sec = has_sec or in_ext
-        elif in_ext and re.match(r"model\s*=", s):
-            ln = "model = %s" % name
+            in_sec = (s.lower() == "[%s]" % section.lower())
+            has_sec = has_sec or in_sec
+        elif in_sec and re.match(r"%s\s*=" % re.escape(key), s):
+            ln = new
             done = True
         out.append(ln)
-    if in_ext and not done:
-        out.append("model = %s" % name)
+    if in_sec and not done:
+        out.append(new)
         done = True
     if not has_sec:
-        out += ["", "[extruder]", "model = %s" % name]
+        out += ["", "[%s]" % section, new]
     with open(path, "w") as fh:
         fh.write("\n".join(out).strip("\n") + "\n")
+
+
+def set_local_model(path, name):
+    """Write  [extruder] model = NAME  into machine.local.ini."""
+    set_local_value(path, "extruder", "model", name)
 
 
 def ask_extruder(profiles):
@@ -634,6 +640,8 @@ def main():
                     help="set the extruder model without asking (e.g. LGX_LITE_PRO)")
     ap.add_argument("--list-extruders", action="store_true",
                     help="show the supported extruders and stop")
+    ap.add_argument("--no-ask", action="store_true",
+                    help="never ask on the keyboard (used by the web wizard)")
     a = ap.parse_args()
 
     local_profiles = os.path.join(os.path.dirname(a.local_ini), "extruder_profiles.local.ini")
@@ -659,7 +667,7 @@ def main():
         if not a.check:
             set_local_model(a.local_ini, key)
             cfg = read_cfg()
-    elif (a.choose_extruder or chosen_model(cfg) is None) and not a.check:
+    elif (a.choose_extruder or (chosen_model(cfg) is None and not a.no_ask)) and not a.check:
         picked = ask_extruder(profiles) if profiles.sections() else None
         if picked:
             set_local_model(a.local_ini, picked)
