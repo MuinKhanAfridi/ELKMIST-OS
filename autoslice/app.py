@@ -45,6 +45,13 @@ try:
 except Exception as _wizard_error:
     print("Setup wizard not loaded: %s" % _wizard_error)
 
+# Guided calibration page (autoslice/calibrate.py), same safety rule as above.
+try:
+    import calibrate
+    calibrate.register(app)
+except Exception as _calibrate_error:
+    print("Calibration page not loaded: %s" % _calibrate_error)
+
 os.makedirs(JOBS_DIR, exist_ok=True)
 jobs = {}                       # id -> dict
 jobs_lock = threading.Lock()
@@ -216,7 +223,7 @@ pre{white-space:pre-wrap;background:var(--bg);border-radius:8px;padding:10px;fon
 a{color:var(--acc)}
 </style></head><body><main>
 <h1>{{ s.printer_name }}</h1>
-<p class="sub">Auto Slicer &middot; bed {{ s.bed_x|int }} &times; {{ s.bed_y|int }} mm</p>
+<p class="sub">Auto Slicer &middot; bed {{ s.bed_x|int }} &times; {{ s.bed_y|int }} mm &middot; <a href="calibrate">Calibrate</a> &middot; <a href="setup">Setup</a></p>
 {% if not s.motion_enabled %}
 <div class="card" style="border-color:var(--err)"><b>Setup not finished.</b>
 The printer is still in safe mode, so printing is disabled. You can slice, but the print cannot start.</div>
